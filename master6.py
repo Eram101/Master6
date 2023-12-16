@@ -1,10 +1,9 @@
 import os
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-import time
-from cachetools import TTLCache
 
 TELEGRAM_BOT_TOKEN = "6986622662:AAEcaJWizB9Rpy_zdmBJcHxr6lU_HddGMOk"  # Replace with your bot token
 
@@ -15,17 +14,18 @@ for directory in [UPLOADS_DIR, OUTPUTS_DIR]:
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-processed_domains = TTLCache(maxsize=100000, ttl=600)  # Cache processed domains for 10 minutes
+processed_domains = set()
 
 file_queue = []
 processing_now = False
 executor = None
 
 ALLOWED_USER_IDS = {6023294627, 5577750831, 1187810967}
+user_timers = {}
 
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
-        'Welcome to Subdomain Enumeration Bot!\nSend me a file with domains or a single domain to get started.'
+        'Welcome to Subdomain Enumeration Bot!\nSend me a file with domains or a single domain to get started.\nIf you are not allowed to use the bot chat with @Eram1link to buy subscription.\nSend your chat id to admin get it here @getmyid_bot\nTo check for remaining time use this /timeleft.'
     )
 
 def process_file(file_entry, context: CallbackContext) -> None:
@@ -38,37 +38,24 @@ def process_file(file_entry, context: CallbackContext) -> None:
         with open(os.path.join(UPLOADS_DIR, file_name), 'r') as file:
             domains = file.read().splitlines()
 
-        new_domains = list(set(domains) - set(processed_domains.keys()))
+        new_domains = list(set(domains) - processed_domains)
 
         if not new_domains:
             context.bot.send_message(chat_id, "No new domains to process.")
             return
 
-        # Smart retrying with exponential backoff and jitter
-        retries = 0
-        while retries < 3:
-            try:
-                subprocess.check_call([
-                    'subfinder', '-dL',
-                    os.path.join(UPLOADS_DIR, file_name), '-o', output_file_path,
-                    '-t', '8',  # Adjust the number of threads based on the available CPU cores
-                    '-timeout', '10',  # Adjust the timeout for each request
-                ])
-                break
-            except Exception as subfinder_error:
-                print(f"Error running subfinder: {subfinder_error}")
-                sleep_time = min(2 ** retries + (retries * 0.1), 60)
-                time.sleep(sleep_time)
-                retries += 1
+        subprocess.check_call([
+            'subfinder', '-dL',
+            os.path.join(UPLOADS_DIR, file_name), '-o', output_file_path
+        ])
 
         for allowed_chat_id in ALLOWED_USER_IDS:
             try:
-                send_document(context.bot, allowed_chat_id, output_file_path)
+                context.bot.send_document(allowed_chat_id, document=open(output_file_path, 'rb'))
             except Exception as send_error:
                 print(f"Error sending document to chat {allowed_chat_id}: {send_error}")
 
-        for domain in new_domains:
-            processed_domains[domain] = time.time()
+        processed_domains.update(new_domains)
 
         os.remove(os.path.join(UPLOADS_DIR, file_name))
         os.remove(output_file_path)
@@ -86,11 +73,23 @@ def process_file_queue(context: CallbackContext) -> None:
         file_entry = file_queue.pop(0)
         executor.submit(process_file, file_entry, context)
 
-def send_document(bot, chat_id, file_path):
+def add_user(update: Update, context: CallbackContext) -> None:
     try:
-        bot.send_document(chat_id, document=open(file_path, 'rb'))
-    except Exception as send_error:
-        print(f"Error sending document to chat {chat_id}: {send_error}")
+        user_id_to_add = int(context.args[0])
+        duration_seconds = int(context.args[1])
+
+        if update.message.from_user.id in ALLOWED_USER_IDS:
+            ALLOWED_USER_IDS.add(user_id_to_add)
+            user_timers[user_id_to_add] = time.time() + duration_seconds
+            update.message.reply_text(f"User {user_id_to_add} added for {duration_seconds} seconds.")
+
+            # Notify the new user about being added and display the granted time
+            context.bot.send_message(user_id_to_add, f"You have been granted access for {duration_seconds} seconds.")
+
+        else:
+            update.message.reply_text("You are not authorized to add users.")
+    except (ValueError, IndexError):
+        update.message.reply_text("Invalid command. Use /add (user_id) (duration_seconds)")
 
 def handle_document(update: Update, context: CallbackContext) -> None:
     global processing_now
@@ -99,9 +98,8 @@ def handle_document(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
 
-    if user_id not in ALLOWED_USER_IDS:
-        context.bot.send_message(
-            chat_id, "You are not authorized to use this bot.")
+    if user_id not in ALLOWED_USER_IDS or (user_id in user_timers and time.time() > user_timers[user_id]):
+        context.bot.send_message(chat_id, "You are not authorized to use this bot.")
         return
 
     if file_name in [entry["file_name"] for entry in file_queue]:
@@ -139,9 +137,8 @@ def handle_text(update: Update, context: CallbackContext) -> None:
     domain = update.message.text.strip().lower()
     user_id = update.message.from_user.id
 
-    if user_id not in ALLOWED_USER_IDS:
-        context.bot.send_message(
-            chat_id, "You are not authorized to use this bot.")
+    if user_id not in ALLOWED_USER_IDS or (user_id in user_timers and time.time() > user_timers[user_id]):
+        context.bot.send_message(chat_id, "You are not authorized to use this bot.")
         return
 
     unique_filename = f"{domain.replace('.', '_')}.txt"
@@ -167,16 +164,32 @@ def handle_text(update: Update, context: CallbackContext) -> None:
     finally:
         process_file_queue(context)
 
+def time_left(update: Update, context: CallbackContext) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id in ALLOWED_USER_IDS and user_id in user_timers:
+        current_time = time.time()
+        expiration_time = user_timers[user_id]
+
+        if current_time < expiration_time:
+            time_remaining = int(expiration_time - current_time)
+            update.message.reply_text(f"You have {time_remaining} seconds left.")
+        else:
+            update.message.reply_text("Your access has expired.")
+    else:
+        update.message.reply_text("You are not authorized to use this command.")
+
 def main() -> None:
     global executor
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
         dispatcher = updater.dispatcher
 
         dispatcher.add_handler(CommandHandler("start", start))
+        dispatcher.add_handler(CommandHandler("add", add_user))
+        dispatcher.add_handler(CommandHandler("timeleft", time_left))  # New command handler
         dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
-        dispatcher.add_handler(
-            MessageHandler(Filters.text & ~Filters.command, handle_text))
+        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
         updater.start_polling()
         updater.idle()
