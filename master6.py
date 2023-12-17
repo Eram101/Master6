@@ -20,12 +20,29 @@ file_queue = []
 processing_now = False
 executor = None
 
-ALLOWED_USER_IDS = {6023294627, 5577750831, 1187810967}
+# Admin user IDs
+ADMIN_USER_IDS = {6023294627, 5577750831, 1187810967}
+
+# Regular user IDs
+REGULAR_USER_IDS = set()
+
 user_timers = {}
 
 def start(update: Update, context: CallbackContext) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id in ADMIN_USER_IDS:
+        role = "Admin"
+    elif user_id in REGULAR_USER_IDS:
+        role = "Regular User"
+    else:
+        role = "Unauthorized User"
+
     update.message.reply_text(
-        'Welcome to Subdomain Enumeration Bot!\nSend me a file with domains or a single domain to get started.\nIf you are not allowed to use the bot chat with @Eram1link to buy a subscription.\nSend your chat id to admin get it here @getmyid_bot\nTo check for remaining time use this /timeleft.'
+        f'Welcome to Subdomain Enumeration Bot!\n'
+        f'Send me a file with domains or a single domain to get started.\n'
+        f'Your role: {role}\n'
+        f'To check for remaining time use this /timeleft.'
     )
 
 def process_file(file_entry, context: CallbackContext) -> None:
@@ -75,13 +92,13 @@ def add_user(update: Update, context: CallbackContext) -> None:
         user_id_to_add = int(context.args[0])
         duration_seconds = int(context.args[1])
 
-        if update.message.from_user.id in ALLOWED_USER_IDS:
-            ALLOWED_USER_IDS.add(user_id_to_add)
+        if update.message.from_user.id in ADMIN_USER_IDS:
+            REGULAR_USER_IDS.add(user_id_to_add)
             user_timers[user_id_to_add] = time.time() + duration_seconds
-            update.message.reply_text(f"User {user_id_to_add} added for {duration_seconds} seconds.")
+            update.message.reply_text(f"User {user_id_to_add} added for {duration_seconds} seconds as a Regular User.")
 
             # Notify the new user about being added and display the granted time
-            context.bot.send_message(user_id_to_add, f"You have been granted access for {duration_seconds} seconds.")
+            context.bot.send_message(user_id_to_add, f"You have been granted access for {duration_seconds} seconds as a Regular User.")
 
         else:
             update.message.reply_text("You are not authorized to add users.")
@@ -95,7 +112,7 @@ def handle_document(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
 
-    if user_id not in ALLOWED_USER_IDS or (user_id in user_timers and time.time() > user_timers[user_id]):
+    if user_id not in ADMIN_USER_IDS and (user_id not in REGULAR_USER_IDS or (user_id in user_timers and time.time() > user_timers[user_id])):
         context.bot.send_message(chat_id, "You are not authorized to use this bot.")
         return
 
@@ -134,7 +151,7 @@ def handle_text(update: Update, context: CallbackContext) -> None:
     domain = update.message.text.strip().lower()
     user_id = update.message.from_user.id
 
-    if user_id not in ALLOWED_USER_IDS or (user_id in user_timers and time.time() > user_timers[user_id]):
+    if user_id not in ADMIN_USER_IDS and (user_id not in REGULAR_USER_IDS or (user_id in user_timers and time.time() > user_timers[user_id])):
         context.bot.send_message(chat_id, "You are not authorized to use this bot.")
         return
 
@@ -164,7 +181,7 @@ def handle_text(update: Update, context: CallbackContext) -> None:
 def time_left(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
 
-    if user_id in ALLOWED_USER_IDS and user_id in user_timers:
+    if user_id in ADMIN_USER_IDS and user_id in user_timers:
         current_time = time.time()
         expiration_time = user_timers[user_id]
 
@@ -184,7 +201,7 @@ def main() -> None:
 
         dispatcher.add_handler(CommandHandler("start", start))
         dispatcher.add_handler(CommandHandler("add", add_user))
-        dispatcher.add_handler(CommandHandler("timeleft", time_left))  # New command handler
+        dispatcher.add_handler(CommandHandler("timeleft", time_left))
         dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
         dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
@@ -193,4 +210,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-    
