@@ -28,6 +28,7 @@ REGULAR_USER_IDS = set()
 
 user_timers = {}
 
+
 def start(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
 
@@ -44,6 +45,7 @@ def start(update: Update, context: CallbackContext) -> None:
         f'Your role: {role}\n'
         f'To check for remaining time use this /timeleft.'
     )
+
 
 def process_file(file_entry, context: CallbackContext) -> None:
     try:
@@ -81,11 +83,13 @@ def process_file(file_entry, context: CallbackContext) -> None:
     finally:
         process_file_queue(context)
 
+
 def process_file_queue(context: CallbackContext) -> None:
     global processing_now
     if file_queue:
         file_entry = file_queue.pop(0)
         executor.submit(process_file, file_entry, context)
+
 
 def add_user(update: Update, context: CallbackContext) -> None:
     try:
@@ -95,15 +99,19 @@ def add_user(update: Update, context: CallbackContext) -> None:
         if update.message.from_user.id in ADMIN_USER_IDS:
             REGULAR_USER_IDS.add(user_id_to_add)
             user_timers[user_id_to_add] = time.time() + duration_seconds
-            update.message.reply_text(f"User {user_id_to_add} added for {duration_seconds} seconds as a Regular User.")
+            update.message.reply_text(
+                f"User {user_id_to_add} added for {duration_seconds} seconds as a Regular User.")
 
             # Notify the new user about being added and display the granted time
-            context.bot.send_message(user_id_to_add, f"You have been granted access for {duration_seconds} seconds as a Regular User.")
+            context.bot.send_message(
+                user_id_to_add, f"You have been granted access for {duration_seconds} seconds as a Regular User.")
 
         else:
             update.message.reply_text("You are not authorized to add users.")
     except (ValueError, IndexError):
-        update.message.reply_text("Invalid command. Use /add (user_id) (duration_seconds)")
+        update.message.reply_text(
+            "Invalid command. Use /add (user_id) (duration_seconds)")
+
 
 def handle_document(update: Update, context: CallbackContext) -> None:
     global processing_now
@@ -130,7 +138,8 @@ def handle_document(update: Update, context: CallbackContext) -> None:
         file.download(upload_file_path)
 
         if not processing_now:
-            update.message.reply_text("Please wait. This might take some time!")
+            update.message.reply_text(
+                "Please wait. This might take some time!")
 
         file_queue.append({"file_name": file_name, "chat_id": chat_id})
 
@@ -140,10 +149,12 @@ def handle_document(update: Update, context: CallbackContext) -> None:
 
     except Exception as e:
         print(f"Error during file processing: {e}")
-        context.bot.send_message(chat_id, f"Error during file processing: {e}")
+        context.bot.send_message(
+            chat_id, f"Error during file processing: {e}")
 
     finally:
         process_file_queue(context)
+
 
 def handle_text(update: Update, context: CallbackContext) -> None:
     global processing_now
@@ -163,7 +174,8 @@ def handle_text(update: Update, context: CallbackContext) -> None:
             temp_file.write(domain)
 
         if not processing_now:
-            update.message.reply_text("Please wait. This might take some time!")
+            update.message.reply_text(
+                "Please wait. This might take some time!")
 
         file_queue.append({"file_name": unique_filename, "chat_id": chat_id})
 
@@ -173,10 +185,12 @@ def handle_text(update: Update, context: CallbackContext) -> None:
 
     except Exception as e:
         print(f"Error during file processing: {e}")
-        context.bot.send_message(chat_id, f"Error during file processing: {e}")
+        context.bot.send_message(
+            chat_id, f"Error during file processing: {e}")
 
     finally:
         process_file_queue(context)
+
 
 def time_left(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
@@ -187,14 +201,78 @@ def time_left(update: Update, context: CallbackContext) -> None:
 
         if current_time < expiration_time:
             time_remaining = int(expiration_time - current_time)
-            update.message.reply_text(f"You have {time_remaining} seconds left.")
+            update.message.reply_text(
+                f"You have {time_remaining} seconds left.")
         else:
             update.message.reply_text("Your access has expired.")
     else:
-        update.message.reply_text("You are not authorized to use this command.")
+        update.message.reply_text(
+            "You are not authorized to use this command.")
 
-def main() -> None:
-    global executor
+
+def view_processed_domains(update: Update, context: CallbackContext) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id in ADMIN_USER_IDS:
+        processed_domains_list = list(processed_domains)
+        message = "\n".join(
+            processed_domains_list) if processed_domains_list else "No domains processed yet."
+        update.message.reply_text(f"Processed domains:\n{message}")
+    else:
+        update.message.reply_text(
+            "You are not authorized to use this command.")
+
+
+def clear_processed_domains(update: Update, context: CallbackContext) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id in ADMIN_USER_IDS:
+        processed_domains.clear()
+        update.message.reply_text("Processed domains list cleared.")
+    else:
+        update.message.reply_text(
+            "You are not authorized to use this command.")
+
+
+def list_users(update: Update, context: CallbackContext) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id in ADMIN_USER_IDS:
+        admins = list(ADMIN_USER_IDS)
+        regular_users_info = []
+
+        for user_id in REGULAR_USER_IDS:
+            time_remaining = user_timers.get(user_id, 0) - time.time()
+            time_remaining_text = (
+                f"{int(time_remaining)} seconds left" if time_remaining > 0 else "No time limit"
+            )
+            regular_users_info.append((user_id, time_remaining_text))
+
+        message = f"Admins: {admins}\nRegular Users:\n"
+        for user_info in regular_users_info:
+            message += f"{user_info[0]} - {user_info[1]}\n"
+
+        update.message.reply_text(message)
+    else:
+        update.message.reply_text(
+            "You are not authorized to use this command.")
+
+
+
+def help_command(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text(
+        "Available commands:\n"
+        "/start - Start the bot\n"
+        "/add (user_id) (duration_seconds) - Add a user with limited access\n"
+        "/timeleft - Check remaining time (admin only)\n"
+        "/viewprocessed - View processed domains (admin only)\n"
+        "/clearprocessed - Clear processed domains list (admin only)\n"
+        "/listusers - List admins and regular users (admin only)\n"
+        "/help - Display this help message"
+    )
+
+
+if __name__ == '__main__':
     with ThreadPoolExecutor(max_workers=2) as executor:
         updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
         dispatcher = updater.dispatcher
@@ -202,11 +280,15 @@ def main() -> None:
         dispatcher.add_handler(CommandHandler("start", start))
         dispatcher.add_handler(CommandHandler("add", add_user))
         dispatcher.add_handler(CommandHandler("timeleft", time_left))
+        dispatcher.add_handler(
+            CommandHandler("viewprocessed", view_processed_domains))
+        dispatcher.add_handler(
+            CommandHandler("clearprocessed", clear_processed_domains))
+        dispatcher.add_handler(CommandHandler("listusers", list_users))
+        dispatcher.add_handler(CommandHandler("help", help_command))
         dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
-        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+        dispatcher.add_handler(
+            MessageHandler(Filters.text & ~Filters.command, handle_text))
 
         updater.start_polling()
         updater.idle()
-
-if __name__ == '__main__':
-    main()
