@@ -25,7 +25,7 @@ user_timers = {}
 
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
-        'Welcome to Subdomain Enumeration Bot!\nSend me a file with domains or a single domain to get started.\nIf you are not allowed to use the bot chat with @Eram1link to buy subscription.\nSend your chat id to admin get it here @getmyid_bot\nTo check for remaining time use this /timeleft.'
+        'Welcome to Subdomain Enumeration Bot!\nSend me a file with domains or a single domain to get started.\nIf you are not allowed to use the bot chat with @Eram1link to buy a subscription.\nSend your chat id to admin get it here @getmyid_bot\nTo check for remaining time use this /timeleft.'
     )
 
 def process_file(file_entry, context: CallbackContext) -> None:
@@ -49,11 +49,8 @@ def process_file(file_entry, context: CallbackContext) -> None:
             os.path.join(UPLOADS_DIR, file_name), '-o', output_file_path
         ])
 
-        for allowed_chat_id in ALLOWED_USER_IDS:
-            try:
-                context.bot.send_document(allowed_chat_id, document=open(output_file_path, 'rb'))
-            except Exception as send_error:
-                print(f"Error sending document to chat {allowed_chat_id}: {send_error}")
+        # Send the document only to the user who initiated the file processing
+        context.bot.send_document(chat_id, document=open(output_file_path, 'rb'))
 
         processed_domains.update(new_domains)
 
@@ -196,3 +193,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+    
