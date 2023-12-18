@@ -273,7 +273,7 @@ def help_command(update: Update, context: CallbackContext) -> None:
 
 
 if __name__ == '__main__':
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1000) as executor:
         updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
         dispatcher = updater.dispatcher
 
