@@ -1,1 +1,1 @@
-web: python master6.py
+worker: python master6.py
