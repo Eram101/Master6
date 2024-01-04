@@ -16,4 +16,3 @@ telegram
 tornado
 tzlocal
 urllib3
-subfinder
