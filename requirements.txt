@@ -15,3 +15,4 @@ sniffio
 telegram
 tornado
 tzlocal
+urllib3
