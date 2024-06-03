@@ -7,13 +7,13 @@ h11
 httpcore
 httpx
 idna
-python-telegram-bot==13.7
 pytz
 retrying
-six
 sniffio
 telegram
 tornado
 tzlocal
-urllib3==1.25.11
 sublist3r
+python-telegram-bot==13.7
+urllib3==1.25.11
+six==1.16.0
