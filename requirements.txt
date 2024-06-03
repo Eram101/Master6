@@ -15,5 +15,5 @@ sniffio
 telegram
 tornado
 tzlocal
-urllib3
+urllib3==1.25.11
 sublist3r
