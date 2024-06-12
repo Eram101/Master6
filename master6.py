@@ -1,313 +1,302 @@
 import os
 import subprocess
 import time
+import pickle
 from concurrent.futures import ThreadPoolExecutor
-from telegram import Update, ParseMode
+from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-from retrying import retry
-import logging
 
-# Set up logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Set your Telegram bot token here
+TELEGRAM_BOT_TOKEN = "6986622662:AAEcaJWizB9Rpy_zdmBJcHxr6lU_HddGMOk"
 
-TELEGRAM_BOT_TOKEN = "6986622662:AAEcaJWizB9Rpy_zdmBJcHxr6lU_HddGMOk"  # Replace with your bot token
-ADMIN_USER_IDS = {6023294627, 5577750831, 1187810967}
-REGULAR_USER_IDS = set()
+# Directory paths
 UPLOADS_DIR = "uploads"
 OUTPUTS_DIR = "outputs"
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
-# Ensure directories exist
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-os.makedirs(OUTPUTS_DIR, exist_ok=True)
+# Ensure necessary directories exist
+for directory in [UPLOADS_DIR, OUTPUTS_DIR]:
+    os.makedirs(directory, exist_ok=True)
 
-processed_domains = set()
+# Sets for tracking user roles and processing states
+ADMIN_USER_IDS = {6023294627, 5577750831, 1187810967}
+REGULAR_USER_IDS = set()
+user_timers = {}
+processed_domains = {}
 file_queue = []
 processing_now = False
-executor = ThreadPoolExecutor(max_workers=500)
+global_free_access = 0
 
-user_timers = {}
+executor = ThreadPoolExecutor(max_workers=5)
 
+STATE_FILE = 'processing_state.pkl'
 
-def retry_if_timeout(exception):
-  return isinstance(exception, Exception)
+def save_state():
+    with open(STATE_FILE, 'wb') as f:
+        state = {
+            'file_queue': file_queue,
+            'processing_now': processing_now,
+            'processed_domains': processed_domains,
+            'user_timers': user_timers,
+            'global_free_access': global_free_access,
+        }
+        pickle.dump(state, f)
 
-
-@retry(wait_fixed=2000,
-       stop_max_attempt_number=3,
-       retry_on_exception=retry_if_timeout)
-def make_telegram_api_request(method, *args, **kwargs):
-  return method(*args, **kwargs)
-
+def load_state():
+    global file_queue, processing_now, processed_domains, user_timers, global_free_access
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'rb') as f:
+            state = pickle.load(f)
+            file_queue = state.get('file_queue', [])
+            processing_now = state.get('processing_now', False)
+            processed_domains = state.get('processed_domains', {})
+            user_timers = state.get('user_timers', {})
+            global_free_access = state.get('global_free_access', 0)
 
 def start(update: Update, context: CallbackContext) -> None:
-  user_id = update.message.from_user.id
-  role = "Admin" if user_id in ADMIN_USER_IDS else "Regular User" if user_id in REGULAR_USER_IDS else "Unauthorized User"
+    """Handles the /start command."""
+    user_id = update.message.from_user.id
+    role = "Admin" if user_id in ADMIN_USER_IDS else "Regular User" if user_id in REGULAR_USER_IDS or global_free_access > time.time() else "Unauthorized User"
 
-  update.message.reply_text(
-      f'Welcome to Subdomain Enumeration Bot!\n'
-      f'Send me a file with domains or a single domain to get started.\n'
-      f'Your role: {role}\n'
-      f'To check for remaining time use this /timeleft.')
-
+    update.message.reply_text(
+        f'Welcome to Subdomain Enumeration Bot!\n'
+        f'Send me a file with domains or a single domain to get started.\n'
+        f'Your role: {role}\n'
+        f'To check for remaining time use this /timeleft.'
+    )
 
 def process_file(file_entry, context: CallbackContext) -> None:
-  try:
-    file_name = file_entry["file_name"]
-    chat_id = file_entry["chat_id"]
-    output_file_name = f"{file_name.split('.')[0]}_sub-domains.txt"
-    output_file_path = os.path.join(OUTPUTS_DIR, output_file_name)
-
-    with open(os.path.join(UPLOADS_DIR, file_name), 'r') as file:
-      domains = file.read().splitlines()
-
-    new_domains = list(set(domains) - processed_domains)
-
-    if not new_domains:
-      context.bot.send_message(chat_id, "No new domains to process.")
-      return
-
-    subprocess.check_call([
-        'subfinder', '-dL',
-        os.path.join(UPLOADS_DIR, file_name), '-o', output_file_path
-    ])
-
-    with open(output_file_path, 'rb') as result_file:
-      context.bot.send_document(chat_id, document=result_file)
-
-    processed_domains.update(new_domains)
-    os.remove(os.path.join(UPLOADS_DIR, file_name))
-    os.remove(output_file_path)
-
-  except Exception as e:
-    logger.error(f"Error during enumeration: {e}")
-    context.bot.send_message(chat_id, f"Error during enumeration: {e}")
-
-  finally:
-    process_file_queue(context)
-
-
-def process_file_queue(context: CallbackContext) -> None:
-  global processing_now
-  if file_queue:
-    file_entry = file_queue.pop(0)
-    executor.submit(process_file, file_entry, context)
-
-
-def add_user(update: Update, context: CallbackContext) -> None:
-  try:
-    user_id_to_add = int(context.args[0])
-    duration_seconds = int(context.args[1])
-
-    if update.message.from_user.id in ADMIN_USER_IDS:
-      REGULAR_USER_IDS.add(user_id_to_add)
-      user_timers[user_id_to_add] = time.time() + duration_seconds
-      update.message.reply_text(
-          f"User {user_id_to_add} added for {duration_seconds} seconds as a Regular User."
-      )
-
-      # Notify the new user about being added and display the granted time
-      make_telegram_api_request(
-          context.bot.send_message, user_id_to_add,
-          f"You have been granted access for {duration_seconds} seconds as a Regular User."
-      )
-
-    else:
-      update.message.reply_text("You are not authorized to add users.")
-  except (ValueError, IndexError):
-    update.message.reply_text(
-        "Invalid command. Use /add (user_id) (duration_seconds)")
-
-
-def handle_document(update: Update, context: CallbackContext) -> None:
-  global processing_now
-  file_id = update.message.document.file_id
-  file_name = update.message.document.file_name
-  chat_id = update.message.chat_id
-  user_id = update.message.from_user.id
-
-  if not is_user_authorized(user_id):
-    context.bot.send_message(chat_id,
-                             "You are not authorized to use this bot.")
-    return
-
-  if file_name in [entry["file_name"] for entry in file_queue]:
-    context.bot.send_message(
-        chat_id, f"You have already uploaded the file '{file_name}'.")
-    return
-
-  file = make_telegram_api_request(context.bot.get_file, file_id)
-
-  if file.file_size > MAX_FILE_SIZE_BYTES:
-    context.bot.send_message(chat_id,
-                             "File size exceeds the maximum allowed size.")
-    return
-
-  unique_filename = file_name
-  upload_file_path = os.path.join(UPLOADS_DIR, unique_filename)
-
-  try:
-    file.download(upload_file_path)
-
-    if not processing_now:
-      context.bot.send_message(chat_id,
-                               "Please wait. This might take some time!")
-
-    file_queue.append({"file_name": file_name, "chat_id": chat_id})
-
-    if not processing_now:
-      executor.submit(process_file, file_queue.pop(0), context)
-      processing_now = True
-
-  except Exception as e:
-    logger.error(f"Error during file processing: {e}")
-    context.bot.send_message(chat_id, f"Error during file processing: {e}")
-
-  finally:
-    process_file_queue(context)
-
-
-def handle_text(update: Update, context: CallbackContext) -> None:
-  global processing_now
-  chat_id = update.message.chat_id
-  domain = update.message.text.strip().lower()
-  user_id = update.message.from_user.id
-
-  if is_user_authorized(user_id):
-    unique_filename = f"{domain.replace('.', '_')}.txt"
-    upload_file_path = os.path.join(UPLOADS_DIR, unique_filename)
+    global processing_now
 
     try:
-      with open(upload_file_path, 'w') as temp_file:
-        temp_file.write(domain)
+        file_name = file_entry["file_name"]
+        chat_id = file_entry["chat_id"]
+        output_file_name = f"{file_name.split('.')[0]}_sub-domains.txt"
+        output_file_path = os.path.join(OUTPUTS_DIR, output_file_name)
 
-      if not processing_now:
-        context.bot.send_message(chat_id,
-                                 "Please wait. This might take some time!")
+        with open(os.path.join(UPLOADS_DIR, file_name), 'r') as file:
+            domains = file.read().splitlines()
 
-      file_queue.append({"file_name": unique_filename, "chat_id": chat_id})
+        new_domains = [domain for domain in domains if domain not in processed_domains]
 
-      if not processing_now:
-        executor.submit(process_file, file_queue.pop(0), context)
-        processing_now = True
+        if not new_domains:
+            context.bot.send_message(chat_id, "No new domains to process.")
+            for domain in domains:
+                if domain in processed_domains:
+                    context.bot.send_document(chat_id, document=open(processed_domains[domain], 'rb'))
+            return
+
+        subprocess.check_call([
+            'subfinder', '-dL',
+            os.path.join(UPLOADS_DIR, file_name), '-o', output_file_path
+        ])
+
+        context.bot.send_document(chat_id, document=open(output_file_path, 'rb'))
+
+        for domain in new_domains:
+            processed_domains[domain] = output_file_path
+
+        os.remove(os.path.join(UPLOADS_DIR, file_name))
+        
+        save_state()  # Save state after processing
 
     except Exception as e:
-      logger.error(f"Error during file processing: {e}")
-      context.bot.send_message(chat_id, f"Error during file processing: {e}")
+        context.bot.send_message(chat_id, f"Error during enumeration: {e}")
 
     finally:
-      process_file_queue(context)
-  else:
-    context.bot.send_message(chat_id,
-                             "You are not authorized to use this bot.")
+        process_file_queue(context)
 
+def process_file_queue(context: CallbackContext) -> None:
+    global processing_now
+    if file_queue:
+        file_entry = file_queue.pop(0)
+        executor.submit(process_file, file_entry, context)
+        save_state()  # Save state after queue update
+    else:
+        processing_now = False
 
-def is_user_authorized(user_id):
-  return (user_id in ADMIN_USER_IDS or
-          (user_id in REGULAR_USER_IDS and
-           (user_id not in user_timers or time.time() < user_timers[user_id])))
+def add_user(update: Update, context: CallbackContext) -> None:
+    """Adds a user with limited access."""
+    user_id = update.message.from_user.id
 
+    if user_id in ADMIN_USER_IDS:
+        try:
+            target_user_id = int(context.args[0])
+            duration_seconds = int(context.args[1])
+            user_timers[target_user_id] = time.time() + duration_seconds
+            save_state()
+            update.message.reply_text(f"User {target_user_id} added with access for {duration_seconds} seconds.")
+        except (ValueError, IndexError):
+            update.message.reply_text("Invalid command. Use /add (user_id) (duration_seconds)")
+    else:
+        update.message.reply_text("You are not authorized to use this command.")
 
 def time_left(update: Update, context: CallbackContext) -> None:
-  user_id = update.message.from_user.id
+    """Checks the remaining time for the user."""
+    user_id = update.message.from_user.id
 
-  if user_id in ADMIN_USER_IDS and user_id in user_timers:
-    current_time = time.time()
-    expiration_time = user_timers[user_id]
-
-    if current_time < expiration_time:
-      time_remaining = int(expiration_time - current_time)
-      make_telegram_api_request(update.message.reply_text,
-                                f"You have {time_remaining} seconds left.")
+    if user_id in user_timers:
+        remaining_time = user_timers[user_id] - time.time()
+        if remaining_time > 0:
+            update.message.reply_text(f"Time remaining: {int(remaining_time)} seconds.")
+        else:
+            update.message.reply_text("Your access has expired.")
+    elif global_free_access > time.time():
+        remaining_time = global_free_access - time.time()
+        update.message.reply_text(f"Global free access time remaining: {int(remaining_time)} seconds.")
     else:
-      make_telegram_api_request(update.message.reply_text,
-                                "Your access has expired.")
-  else:
-    make_telegram_api_request(update.message.reply_text,
-                              "You are not authorized to use this command.")
+        update.message.reply_text("You do not have access.")
 
+def handle_document(update: Update, context: CallbackContext) -> None:
+    """Handles document uploads."""
+    user_id = update.message.from_user.id
+
+    if not is_user_authorized(user_id):
+        update.message.reply_text("You are not authorized to use this bot.")
+        return
+
+    document = update.message.document
+    file = document.get_file()
+    file_name = document.file_name
+    file_path = os.path.join(UPLOADS_DIR, file_name)
+
+    file.download(file_path)
+
+    file_queue.append({"file_name": file_name, "chat_id": update.message.chat_id})
+    save_state()
+
+    update.message.reply_text(f"File {file_name} received. Processing will start shortly.")
+    if not processing_now:
+        process_file_queue(context)
+
+def handle_text(update: Update, context: CallbackContext) -> None:
+    """Handles text messages (for single domain processing)."""
+    user_id = update.message.from_user.id
+
+    if not is_user_authorized(user_id):
+        update.message.reply_text("You are not authorized to use this bot.")
+        return
+
+    domain = update.message.text.strip()
+    file_name = f"{domain.replace('.', '_')}.txt"
+    file_path = os.path.join(UPLOADS_DIR, file_name)
+
+    with open(file_path, 'w') as file:
+        file.write(domain)
+
+    file_queue.append({"file_name": file_name, "chat_id": update.message.chat_id})
+    save_state()
+
+    update.message.reply_text(f"Domain {domain} received. Processing will start shortly.")
+    if not processing_now:
+        process_file_queue(context)
 
 def view_processed_domains(update: Update, context: CallbackContext) -> None:
-  user_id = update.message.from_user.id
-
-  if user_id in ADMIN_USER_IDS:
-    processed_domains_list = list(processed_domains)
-    message = "\n".join(
-        processed_domains_list
-    ) if processed_domains_list else "No domains processed yet."
-    make_telegram_api_request(update.message.reply_text,
-                              f"Processed domains:\n{message}")
-  else:
-    make_telegram_api_request(update.message.reply_text,
-                              "You are not authorized to use this command.")
-
+    """Shows the processed domains."""
+    update.message.reply_text("Processed domains: " + ", ".join(processed_domains.keys()))
 
 def clear_processed_domains(update: Update, context: CallbackContext) -> None:
-  user_id = update.message.from_user.id
-
-  if user_id in ADMIN_USER_IDS:
+    """Clears the processed domains."""
     processed_domains.clear()
-    make_telegram_api_request(update.message.reply_text,
-                              "Processed domains list cleared.")
-  else:
-    make_telegram_api_request(update.message.reply_text,
-                              "You are not authorized to use this command.")
-
+    save_state()
+    update.message.reply_text("Processed domains cleared.")
 
 def list_users(update: Update, context: CallbackContext) -> None:
-  user_id = update.message.from_user.id
+    """Lists users and their access time."""
+    user_id = update.message.from_user.id
 
-  if user_id in ADMIN_USER_IDS:
-    admins = list(ADMIN_USER_IDS)
-    regular_users_info = []
+    if user_id in ADMIN_USER_IDS:
+        users_info = "\n".join([f"User {uid}: {int(user_timers[uid] - time.time())} seconds left" for uid in user_timers if time.time() < user_timers[uid]])
+        update.message.reply_text(f"Users and remaining access time:\n{users_info}")
+    else:
+        update.message.reply_text("You are not authorized to use this command.")
 
-    for user_id in REGULAR_USER_IDS:
-      time_remaining = user_timers.get(user_id, 0) - time.time()
-      time_remaining_text = (f"{int(time_remaining)} seconds left"
-                             if time_remaining > 0 else "No time limit")
-      regular_users_info.append((user_id, time_remaining_text))
+def free_access(update: Update, context: CallbackContext) -> None:
+    """Grants free access to all users for a specified duration."""
+    global global_free_access  # Declare global variable
 
-    message = f"Admins: {admins}\nRegular Users:\n"
-    for user_info in regular_users_info:
-      message += f"{user_info[0]} - {user_info[1]}\n"
+    user_id = update.message.from_user.id
 
-    make_telegram_api_request(update.message.reply_text, message)
-  else:
-    make_telegram_api_request(update.message.reply_text,
-                              "You are not authorized to use this command.")
+    if user_id in ADMIN_USER_IDS:
+        try:
+            duration_seconds = int(context.args[0])
+            global_free_access = time.time() + duration_seconds
+            save_state()
+            update.message.reply_text(f"Free access granted to all users for {duration_seconds} seconds.")
+        except (ValueError, IndexError):
+            update.message.reply_text("Invalid command. Use /free (duration_in_seconds)")
+    else:
+        update.message.reply_text("You are not authorized to use this command.")
 
+def broadcast(update: Update, context: CallbackContext) -> None:
+    """Broadcasts a message to all users."""
+    user_id = update.message.from_user.id
+
+    if user_id in ADMIN_USER_IDS:
+        message = " ".join(context.args)
+        if message:
+            for user_id in REGULAR_USER_IDS:
+                context.bot.send_message(user_id, message)
+            update.message.reply_text("Broadcast message sent.")
+        else:
+            update.message.reply_text("Message is empty.")
+    else:
+        update.message.reply_text("You are not authorized to use this command.")
+
+def active_users(update: Update, context: CallbackContext) -> None:
+    """Counts the number of active users."""
+    user_id = update.message.from_user.id
+
+    if user_id in ADMIN_USER_IDS:
+        active_user_count = sum(1 for user_id in REGULAR_USER_IDS if user_id in user_timers and time.time() < user_timers[user_id])
+        update.message.reply_text(f"Number of active users: {active_user_count}")
+    else:
+        update.message.reply_text("You are not authorized to use this command.")
 
 def help_command(update: Update, context: CallbackContext) -> None:
-  make_telegram_api_request(
-      update.message.reply_text, "Available commands:\n"
-      "/start - Start the bot\n"
-      "/add (user_id) (duration_seconds) - Add a user with limited access\n"
-      "/timeleft - Check remaining time (admin only)\n"
-      "/viewprocessed - View processed domains (admin only)\n"
-      "/clearprocessed - Clear processed domains list (admin only)\n"
-      "/listusers - List admins and regular users (admin only)\n"
-      "/help - Display this help message")
+    """Displays a help message with available commands."""
+    update.message.reply_text(
+        "Available commands:\n"
+        "/start - Start the bot\n"
+        "/add (user_id) (duration_seconds) - Add a user with limited access\n"
+        "/timeleft - Check remaining access time\n"
+        "/processed - View processed domains\n"
+        "/clear - Clear processed domains\n"
+        "/list - List users and their access time\n"
+        "/free (duration_in_seconds) - Grant free access to all users for specified duration\n"
+        "/broadcast (message) - Broadcast a message to all users\n"
+        "/active - Count the number of active users\n"
+        "/help - Display this help message"
+    )
 
+def is_user_authorized(user_id: int) -> bool:
+    """Checks if a user is authorized."""
+    return user_id in ADMIN_USER_IDS or user_id in REGULAR_USER_IDS or (user_id in user_timers and time.time() < user_timers[user_id]) or global_free_access > time.time()
+
+def main() -> None:
+    """Main function to run the bot."""
+    load_state()  # Load the state on startup
+
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("`TELEGRAM_BOT_TOKEN` is not set. Please set it at the top of the script.")
+
+    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("add", add_user))
+    dispatcher.add_handler(CommandHandler("timeleft", time_left))
+    dispatcher.add_handler(CommandHandler("processed", view_processed_domains))
+    dispatcher.add_handler(CommandHandler("clear", clear_processed_domains))
+    dispatcher.add_handler(CommandHandler("list", list_users))
+    dispatcher.add_handler(CommandHandler("free", free_access))
+    dispatcher.add_handler(CommandHandler("broadcast", broadcast))
+    dispatcher.add_handler(CommandHandler("active", active_users))
+    dispatcher.add_handler(CommandHandler("help", help_command))
+    dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == '__main__':
-  updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-  dispatcher = updater.dispatcher
-
-  dispatcher.add_handler(CommandHandler("start", start))
-  dispatcher.add_handler(CommandHandler("add", add_user))
-  dispatcher.add_handler(CommandHandler("timeleft", time_left))
-  dispatcher.add_handler(
-      CommandHandler("viewprocessed", view_processed_domains))
-  dispatcher.add_handler(
-      CommandHandler("clearprocessed", clear_processed_domains))
-  dispatcher.add_handler(CommandHandler("listusers", list_users))
-  dispatcher.add_handler(CommandHandler("help", help_command))
-  dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
-  dispatcher.add_handler(
-      MessageHandler(Filters.text & ~Filters.command, handle_text))
-
-  updater.start_polling()
-  updater.idle()
+    main()
